@@ -1,0 +1,9 @@
+Aquí tienes un enlace a las instancias de Diaz&Fernandez y Holmberg con los parametros adicionales. El formato es:
+
+#locations #customers
+Fixed costs
+Allocation costs
+Probability of demand
+minimum throughputs
+capacities
+
