@@ -58,15 +58,77 @@ class SFLBD(FLBD):
             < np.matmul( self.probs.reshape((self.numCustomers,1)) 
             ,np.ones((1,self.nscen))) )
 
-    def evaluateSolution(self, solX, assign, outSample=False, nOSScen = 0):
+    # Evaluate a given solution, using original scenarios or out-of-sample
+    # assign is an array with the facility assigned to each customers
+    def computeScenarioCosts(self, assignment, outSample=False, nOSScen = 0):
         if outSample == False:
             samples = self.demandScen
         else:
+            if nOSScen == 0:
+                nOSScen = self.nscen
             rng = default_rng()
             samples = ( rng.random((self.numCustomers,nOSScen))
             < np.matmul( self.probs.reshape((self.numCustomers,1)) 
             ,np.ones((1,nOSScen))) )
+        nscen = samples.shape[1]
+        # Evaluate assignment cost
+        scenCost = np.zeros(nscen)
+        cumObj = np.zeros(nscen)
+        for i in range(self.numFacilities):
+            nCustAssigned = np.zeros(nscen, dtype=int)
+            costSortedSubID = np.argsort(self.assignCost[i,assignment==i])
+            subId = np.argwhere(assignment==i).ravel()
+            for j in subId[costSortedSubID]:
+                idx = ((nCustAssigned < self.maxCapac[i]) & samples[j,:])
+                scenCost += idx * self.assignCost[i,j]
+                nCustAssigned += idx
+            scenCost += (np.sum(samples[subId,:],axis=0)-nCustAssigned)*self.unSatCost
 
+        return scenCost
+    
+    def computeTotalCosts(self, outX, assignment, outSample=False, nOSScen = 0):
+        scenCost = self.computeScenarioCosts(assignment, outSample, nOSScen)
+        totalCost = np.sum(outX * self.openCost)
+        totalCost += np.sum(scenCost) / len(scenCost)
+        return totalCost
+
+    # compute c^\xi_i breaking cost of the current assignment
+    def getBreakCost(self, assignment):
+        nStar = np.inf*np.ones((self.numFacilities,self.nscen))
+        for i in range(self.numFacilities):
+            if np.sum(assignment==i) >= self.maxCapac[i]:
+                # sort assigned by cost
+                costSortedSubID = np.argsort(self.assignCost[i,assignment==i])
+                subId = np.argwhere(assignment==i).ravel()
+                sortedAssigned = subId[costSortedSubID]
+                #print(i, subId[costSortedSubID], assignCost[i,subId[costSortedSubID]],maxCapac[i] )
+                # see demand of assigned in the order
+                demandScenInOrder = self.demandScen[sortedAssigned]
+                # check where maxCapac is reached
+                numCustScen = np.sum(self.demandScen[sortedAssigned], axis=0)
+                # note: if numCustScen[s] < maxCapac then all are true and return index 0
+                whereReachMax = np.argmin(np.cumsum(self.demandScen[sortedAssigned], axis=0) < self.maxCapac[i], axis=0)
+                idMaxReached = (numCustScen >= self.maxCapac[i])
+                nStar[i,idMaxReached] = self.assignCost[i,sortedAssigned[whereReachMax[idMaxReached]]]
+        return nStar
+
+    def getGammaDual(self, breakcost):
+        return np.maximum(self.unSatCost-breakcost,0)
+
+    def getBetaDual(self, assignment, breakCost):
+        cie = breakCost[assignment,:]
+        cijj = self.assignCost[assignment,np.arange(self.numCustomers)]
+        cijjScen = np.hstack([cijj.reshape(self.numCustomers,1)]*self.nscen)
+        betaDual = cie - cijjScen
+        betaDual[betaDual==np.inf] = self.unSatCost - cijjScen[betaDual==np.inf]
+        betaDual[betaDual<0] = 0
+        return betaDual
+
+    def computeDualCost(self, gamma, beta):
+        dualObj = self.unSatCost*np.sum(self.demandScen, axis=0)
+        dualObj -= np.sum(beta*self.demandScen, axis=0)
+        dualObj -= np.matmul(self.maxCapac,gamma)
+        return  dualObj
 
 
     def solveDE(self, timeLimit = 86400):
@@ -98,12 +160,14 @@ class SFLBD(FLBD):
         m.addConstrs(gp.quicksum(W[i,j,s] for j in range(self.numCustomers)) <= self.maxCapac[i] * X[i] for i in range(self.numFacilities) for s in range(self.nscen))
 
         m.setObjective(
-            gp.quicksum(self.openCost[i]*X[i] for i in range(self.numFacilities)) + float(1/self.nscen) * gp.quicksum((self.assignCost[i,j] - self.unSatCost)*W[i,j,s] for i in range(self.numFacilities) for j in range(self.numCustomers) for s in range(self.nscen)), GRB.MINIMIZE)
+            gp.quicksum(self.openCost[i]*X[i] for i in range(self.numFacilities)) + float(1/self.nscen) * gp.quicksum((self.assignCost[i,j] - self.unSatCost)*W[i,j,s] for i in range(self.numFacilities) for j in range(self.numCustomers) for s in range(self.nscen)) +  float(1/self.nscen)*np.sum(self.demandScen)*self.unSatCost, GRB.MINIMIZE)
         print("Updating and solving")
         m.update()
         m.Params.timeLimit = timeLimit
         m.Params.Threads = 4
         self.m = m
+        self.m._varX = X
+        self.m._varY = Y
         m.optimize()
         if m.status == GRB.OPTIMAL:
             solX = np.array([int(X[i].x) for i in range(self.numFacilities)])
@@ -117,64 +181,73 @@ class SFLBD(FLBD):
         else:
             raise Exception("Gurobi solStatus "+str(m.status))        
 
-    # def formulateMP(self):
-    #     self.MP =  gp.Model("MasterProblem")       
-    #     #Defining variables
-    #     X = self.MP.addVars(range(self.numTerminal), lb=0, ub=self.Boundx, name="X")
-    #     resources = self.MP.addConstrs(gp.quicksum(self.Resources[k][i] * X[i] for i in range(self.numTerminal)) <= self.CapResources[k] for k in range(self.numResources))
-    #     theta = self.MP.addVars(range(self.numScen), lb=-1e6, name="theta")
-    #     self.MP.setObjective(
-    #         gp.quicksum(self.Objx[i]*X[i] for i in range(self.numTerminal))
-    #         + gp.quicksum(self.probs[s]*theta[s] for s in range(self.numScen))
-    #     )
-    #     self._varX = X
-    #     self._varTheta = theta
-    #     ## set parameters
-    #     self.MP.Params.OutputFlag = 0
-    #     self.MP.Params.Threads = 4
+    def formulateMP(self):
+        self.MP =  gp.Model("MasterProblem")       
+        #Defining variables
+        X = self.MP.addVars(range(self.numFacilities), vtype=GRB.BINARY, name="X")
+        Y = self.MP.addVars(range(self.numFacilities), range(self.numCustomers), vtype=GRB.BINARY,name='Y')
 
-    # def formulateSP(self):
-    #     self.SP =  gp.Model("SubProblemDual")       
-    #     #Defining variables
-    #     mu = self.SP.addVars(range(self.numCustomers), lb=0, name="mu")
-    #     nu = self.SP.addVars(range(self.numTerminal), lb=0, name="nu")
-    #     self.SP.addConstrs(mu[j] + nu[i] >= -self.Objy[(i,j)] for (i,j) in self.Arcs )
-    #     self.SP.setObjective(0, GRB.MINIMIZE)
-    #     ## Copy variable to acces them later
-    #     self._varMu = mu
-    #     self._varNu = nu
-    #     ## set parameters
-    #     self.SP.Params.InfUnbdInfo = 1
-    #     self.SP.Params.OutputFlag = 0
-    #     self.SP.Params.Threads = 4
+        # assign each customer
+        self.MP.addConstrs(gp.quicksum(Y[i,j] for i in range(self.numFacilities)) == 1 for j in range(self.numCustomers))
 
-    # # Set objective for mu variables given an x
-    # def SPsetX(self, X):
-    #     for i in range(self.numTerminal):
-    #         self._varNu[i].obj = X[i]
-    
-    # # Set objective of lambda variables, solve the problem and returns solution
-    # def SPsolve(self, Demand):
-    #     for j in range(self.numCustomers):
-    #         self._varMu[j].obj = Demand[j]
-    #     self.SP.optimize()
-    #     # Case optimum found (cannot be unbounded)
-    #     if self.SP.status == GRB.OPTIMAL:
-    #         solMu = np.array(self.SP.getAttr('x',self._varMu).values())
-    #         solNu = np.array(self.SP.getAttr('x',self._varNu).values())
-    #         return(1, -self.SP.ObjVal, solMu, solNu)
-    #     else:
-    #         raise Exception("Gurobi solStatus "+str(self.SP.status))
+        # only if open facility
+        self.MP.addConstrs(Y[i,j] <= X[i] for i in range(self.numFacilities) for j in range(self.numCustomers))
 
-    # # Solve master problem
-    # def MPsolve(self):
-    #     self.MP.optimize()
-    #     if self.MP.status == GRB.OPTIMAL:
-    #         solX = np.array(self.MP.getAttr('x',self._varX).values())
-    #         solT = np.array(self.MP.getAttr('x',self._varTheta).values())
-    #         return(self.MP.ObjVal, solX, solT)
-    #     else:
-    #         raise Exception("Gurobi solStatus "+str(self.MP.status))
+        # min assignment
+        self.MP.addConstrs(gp.quicksum(Y[i,j] for j in range(self.numCustomers)) >= self.minCapac[i]*X[i] for i in range(self.numFacilities) )
+
+        theta = self.MP.addVars(range(self.nscen), lb=-1e6, name="theta")
+        self.MP.setObjective( gp.quicksum(self.openCost[i]*X[i] for i in range(self.numFacilities)) + float(1/self.nscen)*np.sum(self.demandScen)*self.unSatCost + float(1/self.nscen)* gp.quicksum(theta[s] for s in range(self.nscen)), GRB.MINIMIZE)
+        self.MP._varX = X
+        self.MP._varY = Y
+        self.MP._varTheta = theta
+        self.MP._prob = self
+        ## set parameters
+        self.MP.Params.OutputFlag = 1
+        self.MP.Params.Threads = 4
+
+    # Solve master problem
+    def MPsolve(self):
+        self.MP.Params.LazyConstraints = 1
+        self.MP.optimize(singleBenders)
+        if self.MP.status == GRB.OPTIMAL:
+            solX = np.array(self.MP.getAttr('x',self.MP._varX).values())
+#            solY = np.array(self.MP.getAttr('x',self.MP._varY).values())
+            solT = np.array(self.MP.getAttr('x',self.MP._varTheta).values())
+            solY = np.zeros(self.numCustomers, dtype=int)            
+            for j in range(self.numCustomers):
+                solY[j] = np.argmax([self.MP._varY[i,j].x for i in range(self.numFacilities)])
+            return(self.MP.ObjVal, solX, solY, solT)
+        else:
+            raise Exception("Gurobi solStatus "+str(self.MP.status))
+
+# %% single Benders
+def singleBenders(model, where):
+    tol_optcut = 1e-5
+    prob = model._prob
+    if where == GRB.Callback.MIPSOL:
+        varY = model.cbGetSolution(model._varY)
+        varT = model.cbGetSolution(model._varTheta)
+        Y = np.zeros(prob.numCustomers, dtype=int)
+        for j in range(prob.numCustomers):
+            Y[j] = np.argmax([varY[i,j] for i in range(prob.numFacilities)])
+        breakcost = prob.getBreakCost(Y)
+        gamma = prob.getGammaDual(breakcost)
+        beta = prob.getBetaDual(Y,breakcost)
+        dCost = prob.computeDualCost(gamma, beta)
+        theta = np.array(list(varT.values()))
+        scenAdd = np.argwhere(dCost > (theta + tol_optcut))
+        for s in scenAdd.ravel():
+            gammaMat = np.broadcast_to(gamma[:,s].reshape(prob.numFacilities,1), (prob.numFacilities,prob.numCustomers))
+            betaMat = np.broadcast_to(beta[:,s].reshape(1,prob.numCustomers), (prob.numFacilities,prob.numCustomers))
+            alphaDualScen = np.maximum(prob.unSatCost - prob.assignCost- betaMat - gammaMat, 0)
+            alphaDualScen[Y,np.arange(prob.numCustomers)] = 0
+            exp1 = gp.quicksum(alphaDualScen[i,j]*model._varY[i,j] for i in range(prob.numFacilities) for j in range(prob.numCustomers))
+            exp2 = gp.quicksum((gammaMat[i,0]*prob.maxCapac[i])*model._varX[i] for i in range(prob.numFacilities))
+            exp3 = np.sum(beta[:,s]*prob.demandScen[:,s])
+            model.cbLazy(model._varTheta[s] >= -(exp1+exp2+exp3))
+
+
 
     # # Benders
     # def Benders(self, method = 'm', timeLimit = 86400, tol_optcut = 1e-5, tol_stopRgap = 1e-6, tol_stopAgap = 1e-6):
@@ -386,26 +459,59 @@ class SFLBD(FLBD):
     #             it += 1
 
 
-# # # %%
-# corefile = '/Users/emoreno/Code/BendersGAPM/Electricity-Small/core_nospace.mps'
-# stochfile = '/Users/emoreno/Code/BendersGAPM/Electricity-Small/stoch_nospace.mps'
-# tmp = SCPP(corefile, stochfile)
-# tmp.genScenarios(1000)
-# tmp.formulateMP()
-# tmp.formulateSP()
-# tmp.Benders('p',timeLimit = 600)
+# %%
+datfile = './FLPBD_instances/EJ_p23_4.dat'
+prob = SFLBD(datfile)
+prob.genScenarios(100)
+obj, X, Y = prob.solveDE()
 
-# # %%
-# corefile = '/Users/emoreno/Code/BendersGAPM/Electricity-Small/core_nospace.mps'
-# stochfile = '/Users/emoreno/Code/BendersGAPM/Electricity-Small/stoch_nospace.mps'
-# tmp = SCPP(corefile, stochfile)
-# tmp.genScenarios(1000)
-# tmp.formulateSP()
-# tmp.GAPM()
 
 # %%
+prob.formulateMP()
+obj2,X2,Y2,Theta2 = prob.MPsolve()
 
+# %%
+##%%timeit
+breakcost = prob.getBreakCost(Y)
+gamma = prob.getGammaDual(breakcost)
+beta = prob.getBetaDual(Y,breakcost)
+dualCost = prob.computeDualCost(gamma, beta)
+primalCost = prob.computeScenarioCosts(Y)
+#print(np.max(dualCost - primalCost), np.min(dualCost - primalCost))
 
+# %%
+solY = np.array(prob.m.getAttr('x',prob.m._varY.values())).reshape(prob.numFacilities,prob.numCustomers)
+# %%
+##%%timeit
+alpha = np.zeros((prob.numFacilities,prob.numCustomers,prob.nscen))
+gamma = np.zeros((prob.numFacilities,prob.nscen))
+for i in range(prob.numFacilities):
+    # scenarios where capacity is not reached
+    scenNotReach = np.matmul(solY[i,:],prob.demandScen) < prob.maxCapac[i]
+    costSortedID = np.argsort(prob.assignCost[i,:])
+    # set duals for not reached
+    alpha[i,:,scenNotReach] = (prob.unSatCost-prob.assignCost[i,:])
+    # compute for reached capacity
+    scen = np.argwhere(scenNotReach==False).ravel()
+    if len(scen) > 0:
+        # demand * Y sorted by cost 
+        demPerY = np.broadcast_to(solY[i,costSortedID].reshape(prob.numCustomers,1),(prob.numCustomers, len(scen))) * prob.demandScen[costSortedID,:][:,scen]
+        # compute when reach maxCapac * X and its cost^\xi_i on each scenario
+        idNStar = np.argmin(np.cumsum(demPerY, axis=0) < prob.maxCapac[i], axis=0) ## * X[i]
+        cie = prob.assignCost[i,costSortedID[idNStar]]
+        # Compute duals on these scenatios
+        gamma[i,scen] = prob.unSatCost-cie 
+        for idS in range(len(scen)):
+            alpha[i,:,scen[idS]] = np.maximum(cie[idS]-prob.assignCost[i,:],0)
+
+# Compute objective using duals
+obj = prob.unSatCost*np.sum(prob.demandScen, axis=0)
+obj -= np.matmul(gamma.transpose(), prob.maxCapac) ## * X[i] pero se asume 1
+for s in range(prob.nscen):
+   obj[s] -= np.sum(np.matmul(alpha[:,:,s]*solY, prob.demandScen[:,s]))
+
+  
+  
 # # %%
 # # prob2 = SMCF('/Users/emoreno/Code/BendersGAPM-MCF/instances/r04.1.dow','/Users/emoreno/Code/BendersGAPM-MCF/instances/r04-0-100')
 # # prob2.GAPM()
