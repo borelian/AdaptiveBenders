@@ -125,7 +125,8 @@ class SFLBD(FLBD):
         return betaDual
 
     def computeDualCost(self, gamma, beta):
-        dualObj = self.unSatCost*np.sum(self.demandScen, axis=0)
+        # Removed initial cost because it is included on MP objective separately
+        dualObj = np.zeros(self.nscen) #self.unSatCost*np.sum(self.demandScen, axis=0)
         dualObj -= np.sum(beta*self.demandScen, axis=0)
         dualObj -= np.matmul(self.maxCapac,gamma)
         return  dualObj
@@ -209,6 +210,7 @@ class SFLBD(FLBD):
     # Solve master problem
     def MPsolve(self):
         self.MP.Params.LazyConstraints = 1
+        #self.MP.Params.PreCrush = 0
         self.MP.optimize(singleBenders)
         if self.MP.status == GRB.OPTIMAL:
             solX = np.array(self.MP.getAttr('x',self.MP._varX).values())
@@ -225,7 +227,68 @@ class SFLBD(FLBD):
 def singleBenders(model, where):
     tol_optcut = 1e-5
     prob = model._prob
-    if where == GRB.Callback.MIPSOL:
+    if where == GRB.Callback.MIPNODE:
+        # At root node with an optimal relaxed solution
+        if (model.cbGet(GRB.Callback.MIPNODE_NODCNT) < 1) and (model.cbGet(GRB.Callback.MIPNODE_STATUS) == GRB.OPTIMAL):
+        #if (model.cbGet(GRB.Callback.MIPNODE_STATUS) == GRB.OPTIMAL):
+            solX = np.array(list(model.cbGetNodeRel(model._varX).values())).ravel()
+            solY = np.array(list(model.cbGetNodeRel(model._varY).values())).reshape(prob.numFacilities,prob.numCustomers)
+            solT = np.array(list(model.cbGetNodeRel(model._varTheta).values())).ravel()
+
+            # nz = np.argwhere(solX > 1e-6).ravel()
+            # print([(i, solX[i]) for i in nz])
+            # nz = np.argwhere(solY > 1e-6)
+            # print([(i, j, solY[i,j]) for (i,j) in nz])
+            
+            alpha = np.zeros((prob.numFacilities,prob.numCustomers,prob.nscen))
+            gamma = np.zeros((prob.numFacilities,prob.nscen))
+            for i in range(prob.numFacilities):
+                # scenarios where capacity is not reached
+                scenNotReach = np.matmul(solY[i,:],prob.demandScen) < (prob.maxCapac[i]*solX[i])
+                costSortedID = np.argsort(prob.assignCost[i,:])
+                # set duals for not reached
+                alpha[i,:,scenNotReach] = (prob.unSatCost-prob.assignCost[i,:])
+                # compute for reached capacity
+                scen = np.argwhere(scenNotReach==False).ravel()
+                if len(scen) > 0:
+                    # demand * Y sorted by cost 
+                    demPerY = np.broadcast_to(solY[i,costSortedID].reshape(prob.numCustomers,1),(prob.numCustomers, len(scen))) * prob.demandScen[costSortedID,:][:,scen]
+                    # compute when reach maxCapac * X and its cost^\xi_i on each scenario
+                    idNStar = np.argmin(np.cumsum(demPerY, axis=0) < (prob.maxCapac[i]* solX[i]), axis=0)
+                    cie = prob.assignCost[i,costSortedID[idNStar]]
+                    # Compute duals on these scenatios
+                    gamma[i,scen] = prob.unSatCost-cie 
+                    for idS in range(len(scen)):
+                        alpha[i,:,scen[idS]] = np.maximum(cie[idS]-prob.assignCost[i,:],0)
+            # Compute objective using duals
+            # Removed initial cost because it is included on MP objective separately
+            obj = np.zeros(prob.nscen) #prob.unSatCost*np.sum(prob.demandScen, axis=0)
+            obj -= np.matmul(gamma.transpose(), (prob.maxCapac*solX))
+            #print(gamma[:,0], (prob.maxCapac*solX))
+            for s in range(prob.nscen):
+                obj[s] -= np.sum(np.matmul(alpha[:,:,s]*solY, prob.demandScen[:,s]))
+            ## Add cuts
+            scenAdd = np.argwhere(obj > (solT + tol_optcut))
+            #print("Adding ",len(scenAdd), " user cuts at root node")
+            for s in scenAdd.ravel():
+                # if s == 0:
+                #     print("Scenario ",s, "theta=", solT[s], 'dualObj=',obj[s])
+                nZero = np.argwhere(alpha[:,:,s] > 1e-6)
+                exp1 = gp.quicksum(alpha[i,j,s]*prob.demandScen[j,s]*model._varY[i,j] for (i,j) in nZero) #range(prob.numFacilities) for j in range(prob.numCustomers))
+                # exp1E = gp.quicksum(alpha[i,j,s]*prob.demandScen[j,s]*solY[i,j] for (i,j) in nZero)
+                exp2 = gp.quicksum(gamma[i,s]*prob.maxCapac[i]*model._varX[i] for i in range(prob.numFacilities))
+                # exp2E = gp.quicksum(gamma[i,s]*prob.maxCapac[i]*solX[i] for i in range(prob.numFacilities))
+                # if s == 7:
+                #     print(model._varTheta[s] >= -(exp1+exp2))
+                #     print(solT[s], -(exp1E+exp2E))
+                model.cbLazy(model._varTheta[s] >= -(exp1+exp2))
+            # if len(scenAdd) == 0:
+            #     print("No cuts necessary")
+            #     print(solT)
+                
+    elif where == GRB.Callback.MIPSOL:
+
+        #varX = model.cbGetSolution(model._varX)
         varY = model.cbGetSolution(model._varY)
         varT = model.cbGetSolution(model._varTheta)
         Y = np.zeros(prob.numCustomers, dtype=int)
@@ -237,17 +300,107 @@ def singleBenders(model, where):
         dCost = prob.computeDualCost(gamma, beta)
         theta = np.array(list(varT.values()))
         scenAdd = np.argwhere(dCost > (theta + tol_optcut))
+        #print("Adding ",len(scenAdd), " lazy cuts at B&B node")
         for s in scenAdd.ravel():
             gammaMat = np.broadcast_to(gamma[:,s].reshape(prob.numFacilities,1), (prob.numFacilities,prob.numCustomers))
             betaMat = np.broadcast_to(beta[:,s].reshape(1,prob.numCustomers), (prob.numFacilities,prob.numCustomers))
             alphaDualScen = np.maximum(prob.unSatCost - prob.assignCost- betaMat - gammaMat, 0)
             alphaDualScen[Y,np.arange(prob.numCustomers)] = 0
             exp1 = gp.quicksum(alphaDualScen[i,j]*model._varY[i,j] for i in range(prob.numFacilities) for j in range(prob.numCustomers))
+            #exp1E = gp.quicksum(alphaDualScen[i,j]*varY[i,j] for i in range(prob.numFacilities) for j in range(prob.numCustomers))
             exp2 = gp.quicksum((gammaMat[i,0]*prob.maxCapac[i])*model._varX[i] for i in range(prob.numFacilities))
+            #exp2E = gp.quicksum((gammaMat[i,0]*prob.maxCapac[i])*varX[i] for i in range(prob.numFacilities))
             exp3 = np.sum(beta[:,s]*prob.demandScen[:,s])
+            #exp3E = np.sum(beta[:,s]*prob.demandScen[:,s])
+            # if s == 0:
+            #     print(theta[s], varT[s], -(exp1E+exp2E+exp3E), dCost[s])
+            #     #print(exp1+exp2+exp3)
             model.cbLazy(model._varTheta[s] >= -(exp1+exp2+exp3))
 
 
+# %%
+# solucion raiz para 100 escenarios
+solX = np.zeros(prob.numFacilities)
+for (i,val) in [(10, 1.0), (12, 0.1274725274725281), (18, 0.8725274725274721)]:
+    solX[i] = val
+solY = np.zeros((prob.numFacilities,prob.numCustomers))
+for (i,j,val) in [(10, 0, 0.1274725274725279), (10, 1, 1.0), (10, 2, 1.0), (10, 3, 0.1274725274725279), (10, 4, 1.0), (10, 5, 1.0), (10, 6, 1.0), (10, 8, 1.0), (10, 11, 0.8725274725274719), (10, 12, 0.1274725274725279), (10, 13, 1.0), (10, 15, 0.1274725274725279), (10, 18, 0.1274725274725279), (10, 19, 1.0), (10, 20, 0.1274725274725279), (10, 21, 1.0), (10, 23, 1.0), (10, 24, 1.0), (10, 25, 1.0), (10, 26, 0.8725274725274719), (10, 27, 1.0), (10, 28, 1.0), (10, 29, 1.0), (10, 31, 1.0), (10, 32, 1.0), (10, 33, 0.1274725274725279), (10, 34, 0.8725274725274719), (10, 35, 1.0), (10, 37, 1.0), (12, 7, 0.1274725274725279), (12, 9, 0.1274725274725281), (12, 10, 0.1274725274725279), (12, 11, 0.12747252747252813), (12, 14, 0.1274725274725281), (12, 16, 0.1274725274725281), (12, 17, 0.1274725274725281), (12, 22, 0.1274725274725281), (12, 26, 0.1274725274725281), (12, 30, 0.1274725274725279), (12, 34, 0.1274725274725281), (12, 36, 0.1274725274725279), (12, 38, 0.1274725274725279), (12, 39, 0.1274725274725281), (18, 0, 0.8725274725274721), (18, 3, 0.8725274725274721), (18, 7, 0.8725274725274721), (18, 9, 0.8725274725274719), (18, 10, 0.8725274725274721), (18, 12, 0.8725274725274721), (18, 14, 0.8725274725274721), (18, 15, 0.8725274725274721), (18, 16, 0.8725274725274721), (18, 17, 0.8725274725274721), (18, 18, 0.8725274725274721), (18, 20, 0.8725274725274721), (18, 22, 0.8725274725274721), (18, 30, 0.8725274725274721), (18, 33, 0.8725274725274721), (18, 36, 0.8725274725274721), (18, 38, 0.8725274725274721), (18, 39, 0.8725274725274719)]:
+    solY[i,j] = val
+
+# %%
+datfile = './FLPBD_instances/EJ_p23_4.dat'
+prob = SFLBD(datfile)
+prob.genScenarios(1000)
+obj, X, Y = prob.solveDE()
+
+
+# %%
+prob.formulateMP()
+obj2,X2,Y2,Theta2 = prob.MPsolve()
+
+# %%
+##%%timeit
+breakcost = prob.getBreakCost(Y)
+gamma = prob.getGammaDual(breakcost)
+beta = prob.getBetaDual(Y,breakcost)
+dualCost = prob.computeDualCost(gamma, beta)
+primalCost = prob.computeScenarioCosts(Y)
+#print(np.max(dualCost - primalCost), np.min(dualCost - primalCost))
+
+# %%
+solY = np.array(prob.m.getAttr('x',prob.m._varY.values())).reshape(prob.numFacilities,prob.numCustomers)
+# %%
+##%%timeit
+alpha = np.zeros((prob.numFacilities,prob.numCustomers,prob.nscen))
+gamma = np.zeros((prob.numFacilities,prob.nscen))
+for i in range(prob.numFacilities):
+    # scenarios where capacity is not reached
+    scenNotReach = np.matmul(solY[i,:],prob.demandScen) < (prob.maxCapac[i] * solX[i])
+    costSortedID = np.argsort(prob.assignCost[i,:])
+    # set duals for not reached
+    alpha[i,:,scenNotReach] = (prob.unSatCost-prob.assignCost[i,:])
+    # compute for reached capacity
+    scen = np.argwhere(scenNotReach==False).ravel()
+    if len(scen) > 0:
+        # demand * Y sorted by cost 
+        demPerY = np.broadcast_to(solY[i,costSortedID].reshape(prob.numCustomers,1),(prob.numCustomers, len(scen))) * prob.demandScen[costSortedID,:][:,scen]
+        # compute when reach maxCapac * X and its cost^\xi_i on each scenario
+        idNStar = np.argmin(np.cumsum(demPerY, axis=0) < (prob.maxCapac[i]*solX[i]), axis=0) ## * X[i]
+        cie = prob.assignCost[i,costSortedID[idNStar]]
+        # Compute duals on these scenatios
+        gamma[i,scen] = prob.unSatCost-cie 
+        for idS in range(len(scen)):
+            alpha[i,:,scen[idS]] = np.maximum(cie[idS]-prob.assignCost[i,:],0)
+
+# Compute objective using duals
+obj = prob.unSatCost*np.sum(prob.demandScen, axis=0)
+obj -= np.matmul(gamma.transpose(), (prob.maxCapac*solX)) ## * X[i] pero se asume 1
+for s in range(prob.nscen):
+   obj[s] -= np.sum(np.matmul(alpha[:,:,s]*solY, prob.demandScen[:,s]))
+
+  
+  
+# # %%
+# # prob2 = SMCF('/Users/emoreno/Code/BendersGAPM-MCF/instances/r04.1.dow','/Users/emoreno/Code/BendersGAPM-MCF/instances/r04-0-100')
+# # prob2.GAPM()
+# # prob2.Benders('p', 500)
+# # %%
+# # dem = list(prob2.commDem.values())
+# # prob2.SPsolve(dem)
+# # # %%
+# # prob2.SPsetX(np.ones(prob2.numArcs))
+# # # %%
+# # prob2.SPsolve(list(prob2.commDem.values()))
+# # # %%
+# # prob2.MPsolve()
+
+# # # %%
+
+# # # %%
+
+# # %%
+
+# %%
 
     # # Benders
     # def Benders(self, method = 'm', timeLimit = 86400, tol_optcut = 1e-5, tol_stopRgap = 1e-6, tol_stopAgap = 1e-6):
@@ -457,79 +610,3 @@ def singleBenders(model, where):
     #                 % (it,lb,ub,-ub/(lb-1e-6)+1,0,0,sizePartition,elap_time-start_time))
     #                 break
     #             it += 1
-
-
-# %%
-datfile = './FLPBD_instances/EJ_p23_4.dat'
-prob = SFLBD(datfile)
-prob.genScenarios(100)
-obj, X, Y = prob.solveDE()
-
-
-# %%
-prob.formulateMP()
-obj2,X2,Y2,Theta2 = prob.MPsolve()
-
-# %%
-##%%timeit
-breakcost = prob.getBreakCost(Y)
-gamma = prob.getGammaDual(breakcost)
-beta = prob.getBetaDual(Y,breakcost)
-dualCost = prob.computeDualCost(gamma, beta)
-primalCost = prob.computeScenarioCosts(Y)
-#print(np.max(dualCost - primalCost), np.min(dualCost - primalCost))
-
-# %%
-solY = np.array(prob.m.getAttr('x',prob.m._varY.values())).reshape(prob.numFacilities,prob.numCustomers)
-# %%
-##%%timeit
-alpha = np.zeros((prob.numFacilities,prob.numCustomers,prob.nscen))
-gamma = np.zeros((prob.numFacilities,prob.nscen))
-for i in range(prob.numFacilities):
-    # scenarios where capacity is not reached
-    scenNotReach = np.matmul(solY[i,:],prob.demandScen) < prob.maxCapac[i]
-    costSortedID = np.argsort(prob.assignCost[i,:])
-    # set duals for not reached
-    alpha[i,:,scenNotReach] = (prob.unSatCost-prob.assignCost[i,:])
-    # compute for reached capacity
-    scen = np.argwhere(scenNotReach==False).ravel()
-    if len(scen) > 0:
-        # demand * Y sorted by cost 
-        demPerY = np.broadcast_to(solY[i,costSortedID].reshape(prob.numCustomers,1),(prob.numCustomers, len(scen))) * prob.demandScen[costSortedID,:][:,scen]
-        # compute when reach maxCapac * X and its cost^\xi_i on each scenario
-        idNStar = np.argmin(np.cumsum(demPerY, axis=0) < prob.maxCapac[i], axis=0) ## * X[i]
-        cie = prob.assignCost[i,costSortedID[idNStar]]
-        # Compute duals on these scenatios
-        gamma[i,scen] = prob.unSatCost-cie 
-        for idS in range(len(scen)):
-            alpha[i,:,scen[idS]] = np.maximum(cie[idS]-prob.assignCost[i,:],0)
-
-# Compute objective using duals
-obj = prob.unSatCost*np.sum(prob.demandScen, axis=0)
-obj -= np.matmul(gamma.transpose(), prob.maxCapac) ## * X[i] pero se asume 1
-for s in range(prob.nscen):
-   obj[s] -= np.sum(np.matmul(alpha[:,:,s]*solY, prob.demandScen[:,s]))
-
-  
-  
-# # %%
-# # prob2 = SMCF('/Users/emoreno/Code/BendersGAPM-MCF/instances/r04.1.dow','/Users/emoreno/Code/BendersGAPM-MCF/instances/r04-0-100')
-# # prob2.GAPM()
-# # prob2.Benders('p', 500)
-# # %%
-# # dem = list(prob2.commDem.values())
-# # prob2.SPsolve(dem)
-# # # %%
-# # prob2.SPsetX(np.ones(prob2.numArcs))
-# # # %%
-# # prob2.SPsolve(list(prob2.commDem.values()))
-# # # %%
-# # prob2.MPsolve()
-
-# # # %%
-
-# # # %%
-
-# # %%
-
-# %%
