@@ -247,7 +247,8 @@ class SCPP(CPP):
                         #print(partA, partB, (sum(theta[partitionId==p])/np.sum(partitionId==p)))
                         # Warning: assuming equiprobable for numerical stability
                         if partA+partB > (sum(theta[partitionId==p])/np.sum(partitionId==p)) + tol_optcut:
-                            scen = np.extract(partitionId==p,range(self.numScen)).tolist()
+                            #scen = np.extract(partitionId==p,range(self.numScen)).tolist()
+                            scen = np.flatnonzero(partitionId==p)
                             self.MP.addConstr(
                                 - gp.quicksum(demP[j] * dMu[j] for j in range(self.numCustomers))
                                 - gp.quicksum(dNu[i]*self._varX[i] for i in range(self.numTerminal))
@@ -278,7 +279,8 @@ class SCPP(CPP):
                 singleCutPartA = 0
                 singleCutPartB = np.zeros(self.numTerminal)
                 for p in range(sizePartition):
-                    scen = np.extract(partitionId==p,range(self.numScen)).tolist()
+                    #scen = np.extract(partitionId==p,range(self.numScen)).tolist()
+                    scen = np.flatnonzero(partitionId==p)
                     for s in scen:
                         (stat,objSP,dMu, dNu) = self.SPsolve(self.scens[s])
                         dMuScen[s] = dMu
@@ -380,7 +382,8 @@ class SCPP(CPP):
                 cUB = sum(self.Objx[i]*X[i] for i in range(self.numTerminal))
                 newSizePartition = sizePartition
                 for p in range(sizePartition):
-                    scen = np.extract(partitionId==p,range(self.numScen)).tolist()
+                    #scen = np.extract(partitionId==p,range(self.numScen)).tolist()
+                    scen = np.flatnonzero(partitionId==p)
                     for s in scen:
                         (stat,objSP,dMu, dNu) = self.SPsolve(self.scens[s])
                         dMuScen[s] = dMu
