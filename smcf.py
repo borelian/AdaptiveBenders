@@ -220,7 +220,8 @@ class SMCF(MCF):
                         partB = -sum(dMu[e]*self.arcCap[e]*X[e] for e in range(self.numArcs))
                         # Warning: assuming equiprobable for numerical stability
                         if partA+partB > (sum(theta[partitionId==p])/np.sum(partitionId==p)) + tol_optcut:
-                            scen = np.extract(partitionId==p,range(self.numScen)).tolist()
+                            #scen = np.extract(partitionId==p,range(self.numScen)).tolist()
+                            scen = np.flatnonzero(partitionId==p)
                             self.MP.addConstr(
                                 gp.quicksum(demP[k] * dLambda[k] for k in range(self.numComm))
                                 - gp.quicksum(dMu[e]*self.arcCap[e]*self._varX[e] for e in range(self.numArcs))
@@ -249,7 +250,8 @@ class SMCF(MCF):
                 singleCutPartA = 0
                 singleCutPartB = np.zeros(self.numArcs)
                 for p in range(sizePartition):
-                    scen = np.extract(partitionId==p,range(self.numScen)).tolist()
+                    #scen = np.extract(partitionId==p,range(self.numScen)).tolist()
+                    scen = np.flatnonzero(partitionId==p)
 
                     for s in scen:
                         (stat,objSP,dLambda, dMu) = self.SPsolve(self.scens[s])
@@ -365,7 +367,8 @@ class SMCF(MCF):
                 cUB = sum(self.arcCost[e]*X[e] for e in range(self.numArcs))
                 newSizePartition = sizePartition
                 for p in range(sizePartition):
-                    scen = np.extract(partitionId==p,range(self.numScen)).tolist()
+                    # scen = np.extract(partitionId==p,range(self.numScen)).tolist()
+                    scen = np.flatnonzero(partitionId==p)
                     for s in scen:
                         (stat,objSP,dLambda, dMu) = self.SPsolve(self.scens[s])
                         dLambdasDiff[s] = dLambda
