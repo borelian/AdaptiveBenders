@@ -46,7 +46,7 @@ class FLCVAR:
     def solveDeterministic(self, timeLimit = 86400):
         start_time = time.time()
         m = gp.Model("Deterministic")
-        #Defining variables
+        # Defining variables
         X = m.addVars(range(self.numFacilities), vtype=GRB.BINARY, name="X")
         Y = m.addVars(range(self.numFacilities), range(self.numCustomers), lb=0, name='Y')
 
@@ -142,11 +142,13 @@ class SFLCVAR(FLCVAR):
         if m.status == GRB.OPTIMAL:
             solX = np.array([int(X[i].x) for i in range(self.numFacilities)])
             solY = None
+            solTau = Tau.x
+            solT = np.array([ObjectiveScen[s].x for s in range(self.nscen)])
             print(np.argwhere(solX))
 
             print("FinalReport: %d %f %f %f %d %d %d %f"
                   % (0,m.ObjVal,m.ObjVal,0,0,0,0,time.time()-start_time))
-            return m.ObjVal, solX, solY
+            return m.ObjVal, solX, solTau, solY, solT
         else:
             raise Exception("Gurobi solStatus "+str(m.status))
 
@@ -266,20 +268,21 @@ class SFLCVAR(FLCVAR):
 
 
 
-inst = FLCVAR("cap101.txt")
+inst = FLCVAR("instancesFlcvar/cap101.txt")
 inst.solveDeterministic()
 
-inst = SFLCVAR("cap101.txt")
+inst = SFLCVAR("instancesFlcvar/cap101.txt")
 inst.genScenarios(16)
-inst.solveDE()
+objDE, xDE, tauDE, yDE, tDE = inst.solveDE()
+
 inst.formulateMP()
 inst.formulateSP()
 obj, x, tau, y, t = inst.MPsolve()
 inst.SPsetX(x,tau)
-pricingObjval = 0
+pricingObjval = np.zeros(inst.nscen)
 for s in range(inst.nscen):
     demand = inst.demandScen[:,s]
     status, objSP, a, b, g = inst.SPsolve(demand)
-    pricingObjval += objSP
-    print("Scen:", s, " Objval:", objSP, " Beta:", b)
-print(obj, obj+(1/(1-inst.alpha))*np.sum(pricingObjval)/inst.nscen)
+    pricingObjval[s] = objSP
+    #print("Scen:", s, " Objval:", objSP, " Beta:", b)
+print(objDE/1e6, obj/1e6, (obj+(1/(1-inst.alpha))*np.sum(pricingObjval)/inst.nscen)/1e6)
