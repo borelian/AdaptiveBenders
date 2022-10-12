@@ -279,13 +279,22 @@ def bendersCallback(model, where):
   # partition = prob.currentPartition
 
   # When a new integer solution has been found
-  if where == GRB.Callback.MIPSOL:
+  if (where == GRB.Callback.MIPSOL) or\
+    ((where == GRB.Callback.MIPNODE) and \
+     (model.cbGet(GRB.Callback.MIPNODE_NODCNT) < 1) and \
+     (model.cbGet(GRB.Callback.MIPNODE_STATUS) == GRB.OPTIMAL) and\
+      False):
 
     potentialOptimalFound = False
     # Get solution form master
-    varX = model.cbGetSolution(model._varX)
-    varTau = model.cbGetSolution(model._varTau)
-    varT = model.cbGetSolution(model._varTheta)
+    if (where == GRB.Callback.MIPSOL):
+      varX = model.cbGetSolution(model._varX)
+      varTau = model.cbGetSolution(model._varTau)
+      varT = model.cbGetSolution(model._varTheta)
+    else:
+      varX = model.cbGetNodeRel(model._varX)
+      varTau = model.cbGetNodeRel(model._varTau)
+      varT = model.cbGetNodeRel(model._varTheta)
 
     #fix X on the subproblem
     prob.SPsetX(varX, varTau)
