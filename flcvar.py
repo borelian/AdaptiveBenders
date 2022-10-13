@@ -71,6 +71,11 @@ class FLCVAR:
     self.m._varX = X
     self.m._varY = Y
     m.optimize()
+
+    print("FinalReport: %d %f %f %f %d %d %d %f"
+          % (0, m.getAttr(GRB.Attr.ObjVal), m.getAttr(GRB.Attr.ObjBound), m.getAttr(GRB.Attr.MIPGap), 0, 0, 0, time.time() - start_time))
+
+
     if m.status == GRB.OPTIMAL:
       solX = np.array([int(X[i].x) for i in range(self.numFacilities)])
       solY = np.zeros(self.numCustomers, dtype=int)
@@ -78,8 +83,7 @@ class FLCVAR:
 
       for j in range(self.numCustomers):
         solY[j] = np.argmax([Y[i,j].x for i in range(self.numFacilities)])
-      print("FinalReport: %d %f %f %f %d %d %d %f"
-            % (0,m.ObjVal,m.ObjVal,0,0,0,0,time.time()-start_time))
+
       return m.ObjVal, solX, solY
     else:
       raise Exception("Gurobi solStatus "+str(m.status))
@@ -143,6 +147,10 @@ class SFLCVAR(FLCVAR):
     self.m._varX = X
     self.m._varY = Y
     m.optimize()
+
+    print("FinalReport: %d %f %f %f %d %d %d %f"
+          % (0, m.getAttr(GRB.Attr.ObjVal), m.getAttr(GRB.Attr.ObjBound), m.getAttr(GRB.Attr.MIPGap), 0, 0, 0, time.time() - start_time))
+
     if m.status == GRB.OPTIMAL:
       solX = np.array([int(X[i].x) for i in range(self.numFacilities)])
       solY = None
@@ -150,8 +158,8 @@ class SFLCVAR(FLCVAR):
       solT = np.array([ObjectiveScen[s].x for s in range(self.nscen)])
       print(np.argwhere(solX))
 
-      print("FinalReport: %d %f %f %f %d %d %d %f"
-            % (0,m.ObjVal,m.ObjVal,0,0,0,0,time.time()-start_time))
+      #print("FinalReport: %d %f %f %f %d %d %d %f"
+      #      % (0,m.ObjVal,m.ObjVal,0,0,0,0,time.time()-start_time))
       return m.ObjVal, solX, solTau, solY, solT
     else:
       raise Exception("Gurobi solStatus "+str(m.status))
@@ -262,7 +270,8 @@ class SFLCVAR(FLCVAR):
 
     # recover solution
     if self.MP.status == GRB.OPTIMAL:
-      solX = np.array(self.MP.getAttr('x',self.MP._varX).values())
+      #solX = np.array(self.MP.getAttr('x',self.MP._varX).values())
+      solX = np.array([int(self.MP._varX[i].x) for i in range(self.numFacilities)])
       print(np.argwhere(solX))
       #     solY = np.array(self.MP.getAttr('x',self.MP._varY).values())
       solTau = self.MP._varTau.x
@@ -401,10 +410,14 @@ def bendersCallback(model, where):
 #inst = FLCVAR("instancesFlcvar/cap101.txt")
 #inst.solveDeterministic()
 
-#inst = SFLCVAR("instancesFlcvar/cap131.txt")
-#inst.genScenarios(1)
-#objDE, xDE, tauDE, yDE, tDE = inst.solveDE()
+inst = SFLCVAR("instancesFlcvar/cap41.txt")
+inst.genScenarios(10)
+objDE, xDE, tauDE, yDE, tDE = inst.solveDE(timeLimit=10)
+
+print("tau:", tauDE, " solution:", xDE)
+
 #
-#inst.formulateMP()
-#inst.formulateSP()
-#obj, x, tau, y, t = inst.MPsolve(useMulticuts=True, useAdaptive=True)
+inst.formulateMP()
+inst.formulateSP()
+obj, x, tau, y, t = inst.MPsolve(useMulticuts=True, useAdaptive=True)
+print("tau:", tau, " solution:", x)
