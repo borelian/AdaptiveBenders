@@ -19,6 +19,6 @@ Problems are:
   - Instances: `SMCF_instances/`
 - Facility Location with CVaR 
   - Class: `flcvar.py`
-  - Run file: `runFLCVAR.py`
+  - Run file: `runFLcvar.py`
   - Instances: `instancesFlcvar/`
  
